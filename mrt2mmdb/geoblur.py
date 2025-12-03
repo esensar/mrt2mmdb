@@ -7,18 +7,17 @@ to anonymize the data.
 import csv
 import logging
 import os
-import shutil
 import sys
 from math import asin, cos, radians, sin, sqrt
 from operator import itemgetter
 
 import maxminddb
-from tqdm import tqdm
-
 from args import (admincodes_arg, database_type_arg, geonames_cities_arg,
                   get_args, log_level_arg, min_population_arg, mmdb_arg,
                   quiet_arg, target_arg)
-from filter import rewrite
+from mmdb_writer import MMDBWriter
+from netaddr import IPNetwork, IPSet
+from tqdm import tqdm
 
 
 # Taken from: https://stackoverflow.com/a/4913653
@@ -169,9 +168,9 @@ def get_full_iso_code(data):
     return None
 
 
-def blur(data, cities, admincodes, args, cities_to_update):
+def blur(data, cities, admincodes, args, cities_to_skip):
     if 'city' in data and 'geoname_id' in data['city']:
-        if data['city']['geoname_id'] not in cities_to_update:
+        if data['city']['geoname_id'] in cities_to_skip:
             return data
 
     same_country_cities = (cities.get(get_full_iso_code(data))
@@ -284,13 +283,14 @@ def main():
     if args.admincodes:
         admincodes = parse_admincodes(args.admincodes, args.quiet)
 
-    cities_to_update = {city['geonameid']
-                        for group in cities.values()
-                        for city in group
-                        if city['population'] < args.min_population}
+    cities_to_skip = {city['geonameid']
+                      for group in cities.values()
+                      for city in group
+                      if city['population'] >= args.min_population}
 
-    shutil.copyfile(args.mmdb, args.target)
-
+    writer = MMDBWriter(
+        ip_version=6, ipv4_compatible=True, database_type=args.database_type
+    )
     message = "Blurring location data from " + \
         args.mmdb + " and writing to " + args.target
     with tqdm(
@@ -299,19 +299,21 @@ def main():
         disable=args.quiet,
     ) as pb:
         with maxminddb.open_database(args.mmdb) as mreader:
-            mreader_gen = (
-                (
-                    prefix.compressed,
-                    blur(data, cities, admincodes, args, cities_to_update)
+            for prefix, data in mreader:
+                writer.insert_network(
+                    IPSet(IPNetwork(str(prefix))),
+                    blur(data, cities, admincodes, args, cities_to_skip)
                 )
-                for prefix, data in mreader
-            )
-            rewrite(
-                args.mmdb,
-                mreader_gen,
-                pb,
-                args.target
-            )
+                pb.update(1)
+
+    message = "Writing blurred results into " + args.target
+    with tqdm(
+        desc=f" {message: <80}  ",
+        unit="",
+        disable=args.quiet,
+    ) as pb:
+        writer.to_db_file(args.target)
+        pb.update(1)
 
     return 0
 
