@@ -40,6 +40,17 @@ def json_arg(parser):
     )
 
 
+def threads_arg(parser):
+    """number of threads to use in processing"""
+    return parser.add_argument(
+        "--threads",
+        metavar="",
+        type=int,
+        help="Number of threads to use in processing."
+        "Not valid for all operations",
+    )
+
+
 def geonames_cities_arg(parser):
     """geonames filename, containing cities populations"""
     return parser.add_argument(

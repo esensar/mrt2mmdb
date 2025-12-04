@@ -5,17 +5,20 @@ locations that have a too low population and merges them with nearby locations,
 to anonymize the data.
 """
 import csv
+import itertools
 import json
 import logging
+import multiprocessing
 import os
 import sys
-from math import asin, cos, radians, sin, sqrt
+import tempfile
+from math import asin, ceil, cos, radians, sin, sqrt
 from operator import itemgetter
 
 import maxminddb
 from args import (admincodes_arg, database_type_arg, geonames_cities_arg,
                   get_args, json_arg, log_level_arg, min_population_arg,
-                  mmdb_arg, quiet_arg, target_arg)
+                  mmdb_arg, quiet_arg, target_arg, threads_arg)
 from mmdb_writer import MMDBWriter
 from netaddr import IPNetwork, IPSet
 from tqdm import tqdm
@@ -239,6 +242,20 @@ def blur(data, cities, admincodes, args, cities_to_skip):
     return data
 
 
+def process_json_thread(input_file, start, end, output_file, cities,
+                        admincodes, args, cities_to_skip):
+    with open(input_file, 'r') as input:
+        with open(output_file, 'w') as output:
+            for line in itertools.islice(input, start, end):
+                prefix, data = list(json.loads(line).items())[0]
+                output.write(
+                    json.dumps(dict([(prefix, blur(data, cities,
+                                                   admincodes,
+                                                   args, cities_to_skip))]),
+                               separators=(',', ':')))
+                output.write("\n")
+
+
 def main():
     parser = get_args(
         [
@@ -251,6 +268,7 @@ def main():
             target_arg,
             quiet_arg,
             log_level_arg,
+            threads_arg
         ]
     )
     global args
@@ -301,23 +319,80 @@ def main():
                       if city['population'] >= args.min_population}
 
     if args.json:
-        message = "Blurring location data from " + \
-            args.json + " and writing to " + args.target
-        with tqdm(
-            desc=f" {message: <80}  ",
-            unit=" prefixes",
-            disable=args.quiet,
-        ) as pb:
-            with open(args.json) as input:
+        if args.threads:
+            line_count = 0
+            with open(args.json, 'r') as input:
+                line_count = sum(1 for _ in input)
+
+            message = "Blurring location data from " + args.json
+            with tqdm(
+                desc=f" {message: <80}  ",
+                unit=" prefixes",
+                disable=args.quiet,
+                total=line_count
+            ) as pb:
+                processes = []
+                tmpfiles = []
+                for i in range(args.threads):
+                    (_, tmp) = tempfile.mkstemp(text=True)
+                    tmpfiles.append(tmp)
+                    p = multiprocessing.Process(
+                        target=process_json_thread,
+                        args=(
+                            args.json,
+                            ceil(i * line_count / args.threads),
+                            ceil((i + 1) * line_count / args.threads),
+                            tmp,
+                            cities,
+                            admincodes,
+                            args,
+                            cities_to_skip
+                        )
+                    )
+                    p.start()
+                    processes.append(p)
+
+                while len(processes) > 0:
+                    for p in processes:
+                        p.join(1)
+                        if p.exitcode is not None:
+                            pb.update(line_count / args.threads)
+                            processes.remove(p)
+
+            message = "Writing blurred results into " + args.json
+            with tqdm(
+                desc=f" {message: <80}  ",
+                unit=" prefixes",
+                disable=args.quiet,
+                total=line_count
+            ) as pb:
                 with open(args.target, 'w') as output:
-                    for line in input:
-                        prefix, data = list(json.loads(line).items())[0]
-                        output.write(
-                            json.dumps(dict([(prefix, blur(data, cities,
-                                                           admincodes,
-                                                           args, cities_to_skip))])))
-                        output.write("\n")
-                        pb.update(1)
+                    for file in tmpfiles:
+                        with open(file, 'r') as input:
+                            for line in input:
+                                output.write(line)
+                                pb.update(1)
+                        os.remove(file)
+        else:
+            message = "Blurring location data from " + \
+                args.json + " and writing to " + args.target
+            with tqdm(
+                desc=f" {message: <80}  ",
+                unit=" prefixes",
+                disable=args.quiet,
+            ) as pb:
+                with open(args.json, 'r') as input:
+                    with open(args.target, 'w') as output:
+                        for line in input:
+                            prefix, data = list(json.loads(line).items())[0]
+                            output.write(
+                                json.dumps(dict([(prefix, blur(data, cities,
+                                                               admincodes,
+                                                               args,
+                                                               cities_to_skip))]),
+                                           separators=(',', ':')))
+                            output.write("\n")
+                            pb.update(1)
     elif args.mmdb:
         writer = MMDBWriter(
             ip_version=6, ipv4_compatible=True, database_type=args.database_type
