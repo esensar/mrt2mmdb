@@ -5,6 +5,7 @@ locations that have a too low population and merges them with nearby locations,
 to anonymize the data.
 """
 import csv
+import json
 import logging
 import os
 import sys
@@ -13,8 +14,8 @@ from operator import itemgetter
 
 import maxminddb
 from args import (admincodes_arg, database_type_arg, geonames_cities_arg,
-                  get_args, log_level_arg, min_population_arg, mmdb_arg,
-                  quiet_arg, target_arg)
+                  get_args, json_arg, log_level_arg, min_population_arg,
+                  mmdb_arg, quiet_arg, target_arg)
 from mmdb_writer import MMDBWriter
 from netaddr import IPNetwork, IPSet
 from tqdm import tqdm
@@ -67,7 +68,7 @@ def parse_geonames_cities(
     with tqdm(
         desc=f" {message: <80}  ",
         unit=" lines",
-        disable=args.quiet,
+        disable=quiet,
     ) as pb:
         def clean_up(x):
             x['longitude'] = float(x['longitude'])
@@ -91,7 +92,7 @@ def parse_geonames_cities(
     with tqdm(
         desc=f" {message: <80}  ",
         unit=" cities kept and grouped",
-        disable=args.quiet,
+        disable=quiet,
     ) as pb:
         for city in cities:
             if int(city['population']) < min_population:
@@ -125,7 +126,7 @@ def parse_admincodes(fname, quiet) -> dict[str, dict]:
     with tqdm(
         desc=f" {message: <80}  ",
         unit=" lines",
-        disable=args.quiet,
+        disable=quiet,
     ) as pb:
         def clean_up(x):
             pb.update(1)
@@ -241,6 +242,7 @@ def blur(data, cities, admincodes, args, cities_to_skip):
 def main():
     parser = get_args(
         [
+            json_arg,
             mmdb_arg,
             geonames_cities_arg,
             admincodes_arg,
@@ -263,8 +265,18 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
-    if not os.path.isfile(args.mmdb):
+    if not args.mmdb and not args.json:
+        logger.warning("\nerror: Either --mmdb or --json have to be defined\n")
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+
+    if not args.json and args.mmdb and not os.path.isfile(args.mmdb):
         logger.warning("\nerror: Unable to locate mmdb file\n")
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+
+    if args.json and not os.path.isfile(args.json):
+        logger.warning("\nerror: Unable to locate json file\n")
         parser.print_help(sys.stderr)
         sys.exit(1)
 
@@ -288,32 +300,50 @@ def main():
                       for city in group
                       if city['population'] >= args.min_population}
 
-    writer = MMDBWriter(
-        ip_version=6, ipv4_compatible=True, database_type=args.database_type
-    )
-    message = "Blurring location data from " + \
-        args.mmdb + " and writing to " + args.target
-    with tqdm(
-        desc=f" {message: <80}  ",
-        unit=" prefixes",
-        disable=args.quiet,
-    ) as pb:
-        with maxminddb.open_database(args.mmdb) as mreader:
-            for prefix, data in mreader:
-                writer.insert_network(
-                    IPSet(IPNetwork(str(prefix))),
-                    blur(data, cities, admincodes, args, cities_to_skip)
-                )
-                pb.update(1)
+    if args.json:
+        message = "Blurring location data from " + \
+            args.json + " and writing to " + args.target
+        with tqdm(
+            desc=f" {message: <80}  ",
+            unit=" prefixes",
+            disable=args.quiet,
+        ) as pb:
+            with open(args.json) as input:
+                with open(args.target, 'w') as output:
+                    for line in input:
+                        prefix, data = list(json.loads(line).items())[0]
+                        output.write(
+                            json.dumps(dict([(prefix, blur(data, cities,
+                                                           admincodes,
+                                                           args, cities_to_skip))])))
+                        output.write("\n")
+                        pb.update(1)
+    elif args.mmdb:
+        writer = MMDBWriter(
+            ip_version=6, ipv4_compatible=True, database_type=args.database_type
+        )
+        message = "Blurring location data from " + args.mmdb
+        with tqdm(
+            desc=f" {message: <80}  ",
+            unit=" prefixes",
+            disable=args.quiet,
+        ) as pb:
+            with maxminddb.open_database(args.mmdb) as mreader:
+                for prefix, data in mreader:
+                    writer.insert_network(
+                        IPSet(IPNetwork(str(prefix))),
+                        blur(data, cities, admincodes, args, cities_to_skip)
+                    )
+                    pb.update(1)
 
-    message = "Writing blurred results into " + args.target
-    with tqdm(
-        desc=f" {message: <80}  ",
-        unit="",
-        disable=args.quiet,
-    ) as pb:
-        writer.to_db_file(args.target)
-        pb.update(1)
+        message = "Writing blurred results into " + args.target
+        with tqdm(
+            desc=f" {message: <80}  ",
+            unit="",
+            disable=args.quiet,
+        ) as pb:
+            writer.to_db_file(args.target)
+            pb.update(1)
 
     return 0
 

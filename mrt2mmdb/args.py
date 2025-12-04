@@ -30,6 +30,16 @@ def mmdb_arg(parser):
     )
 
 
+def json_arg(parser):
+    """define arguments to be added"""
+    return parser.add_argument(
+        "--json",
+        metavar="",
+        type=str,
+        help="Filename of JSON file containing MMDB data",
+    )
+
+
 def geonames_cities_arg(parser):
     """geonames filename, containing cities populations"""
     return parser.add_argument(
